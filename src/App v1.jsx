@@ -14,11 +14,10 @@ const firebaseConfig = {
   appId: "1:318604270085:web:d2cf1635a0f07ad81b1a6c",
   measurementId: "G-5DP1G6X3JC"
 };
-
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : "1:318604270085:web:d2cf1635a0f07ad81b1a6c";
+const appId = "trial-commissioning-radar"; // Static string for your DB path
 
 const CTG_API_BASE = 'https://clinicaltrials.gov/api/v2/studies';
 
@@ -31,7 +30,6 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [topics, setTopics] = useState([]);
   const [activeTopicId, setActiveTopicId] = useState('');
-  const [additionalKeywords, setAdditionalKeywords] = useState('');
   const [timeframeMonths, setTimeframeMonths] = useState(60); // 60 = Any
   const [phases, setPhases] = useState({ phase1Impact: false, phase2: true, phase3: true });
   const [minEnrollment, setMinEnrollment] = useState(0);
@@ -81,7 +79,7 @@ export default function App() {
     }, (err) => console.error("Watchlist error:", err));
 
     return () => { unsubTopics(); unsubWatchlist(); };
-  }, [user, activeTopicId]);
+  }, [user]);
 
   const getFutureDate = (months) => {
     const d = new Date();
@@ -145,22 +143,11 @@ export default function App() {
     setResults([]);
 
     try {
-      // 1. Build Keyword Query
-      const topicKeywordArray = activeTopic.keywords.split(',').map(k => k.trim()).filter(Boolean);
-      let termQuery = topicKeywordArray.map(k => `"${k}"`).join(' OR ');
-      
-      if (topicKeywordArray.length > 1) {
-        termQuery = `(${termQuery})`;
-      }
+      // 1. Build Keyword Query (Join with OR)
+      const keywordArray = activeTopic.keywords.split(',').map(k => k.trim()).filter(Boolean);
+      const termQuery = keywordArray.map(k => `"${k}"`).join(' OR ');
 
-      // Add additional keywords as an AND condition
-      if (additionalKeywords.trim()) {
-        const addKeywordArray = additionalKeywords.split(',').map(k => k.trim()).filter(Boolean);
-        const addTermQuery = addKeywordArray.map(k => `"${k}"`).join(' OR ');
-        termQuery = `${termQuery} AND (${addTermQuery})`;
-      }
-
-      // 2. Build Advanced Filters
+      // 2. Build Advanced Filters (Phases and Dates must be combined into one parameter)
       const advancedFilters = [];
 
       const apiPhases = [];
@@ -176,55 +163,36 @@ export default function App() {
         advancedFilters.push(`AREA[PrimaryCompletionDate]RANGE[${getTodayDate()},${getFutureDate(timeframeMonths)}]`);
       }
 
-      // Moved minEnrollment filtering to API
-      if (minEnrollment > 0) {
-        advancedFilters.push(`AREA[EnrollmentCount]RANGE[${minEnrollment},MAX]`);
-      }
-
       const advancedQueryString = advancedFilters.length > 0 
         ? `&filter.advanced=${encodeURIComponent(advancedFilters.join(' AND '))}` 
         : '';
 
-      // 3. Status Filter
+      // 3. Status Filter (We want active/upcoming to commission them)
       const statusFilter = `&filter.overallStatus=NOT_YET_RECRUITING,RECRUITING,ACTIVE_NOT_RECRUITING`;
 
-      // Pagination Loop
-      let allParsedStudies = [];
-      let nextPageToken = null;
-      let pageCount = 0;
-      const MAX_PAGES = 10; // Hard cap at 1000 trials to prevent client crashes
+      const url = `${CTG_API_BASE}?query.term=${encodeURIComponent(termQuery)}${advancedQueryString}${statusFilter}&pageSize=100`;
 
-      do {
-        let url = `${CTG_API_BASE}?query.term=${encodeURIComponent(termQuery)}${advancedQueryString}${statusFilter}&pageSize=100`;
-        if (nextPageToken) url += `&pageToken=${nextPageToken}`;
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`API error: ${response.status}`);
+      const data = await response.json();
 
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`API error: ${response.status}`);
-        const data = await response.json();
-
-        if (data.studies && data.studies.length > 0) {
-          allParsedStudies = allParsedStudies.concat(data.studies.map(parseStudyData));
-        }
-
-        nextPageToken = data.nextPageToken;
-        pageCount++;
-      } while (nextPageToken && pageCount < MAX_PAGES);
-
-      if (allParsedStudies.length === 0) {
+      if (!data.studies || data.studies.length === 0) {
         setError('No trials match this criteria.');
         setLoading(false);
         return;
       }
 
-      // Phase 1 high-impact proxy filter (Client-side logic required here)
+      let parsedStudies = data.studies.map(parseStudyData);
+
+      // Phase 1 high-impact proxy filter
       if (phases.phase1Impact) {
-        allParsedStudies = allParsedStudies.filter(study => {
+        parsedStudies = parsedStudies.filter(study => {
           if (study.phases.includes('PHASE1') && !study.phases.includes('PHASE2')) return study.enrollment > 40;
           return true; 
         });
       }
 
-      setResults(allParsedStudies);
+      setResults(parsedStudies);
     } catch (err) {
       setError(err.message || 'Fetch failed');
     } finally {
@@ -235,7 +203,10 @@ export default function App() {
   const displayResults = useMemo(() => {
     let filtered = results;
     
-    // minEnrollment is now handled by the API, so we only filter sites locally
+    if (minEnrollment > 0) {
+      filtered = filtered.filter(r => r.enrollment >= minEnrollment);
+    }
+    
     if (minSites > 1) {
       filtered = filtered.filter(r => r.sitesCount >= minSites);
     }
@@ -253,7 +224,7 @@ export default function App() {
       }
       return 0;
     });
-  }, [results, minSites, sortConfig]);
+  }, [results, minEnrollment, sortConfig]);
 
   const toggleSort = (key) => {
     setSortConfig(prev => ({
@@ -267,6 +238,7 @@ export default function App() {
     setUpdatesLoading(true);
     
     try {
+      // Fetch in chunks to avoid URL length limits if watchlist is huge
       const nctIds = watchlist.map(w => w.nctId);
       const url = `${CTG_API_BASE}?filter.ids=${nctIds.join(',')}&pageSize=100`;
       
@@ -463,18 +435,7 @@ export default function App() {
                   </select>
                 </div>
 
-                <div className="col-span-1 md:col-span-2">
-                  <label className="block text-sm font-semibold text-neutral-700 mb-1">Additional Keywords (AND)</label>
-                  <input 
-                    type="text"
-                    value={additionalKeywords}
-                    onChange={(e) => setAdditionalKeywords(e.target.value)}
-                    placeholder="e.g. safety, pediatric (comma separated)"
-                    className="w-full p-2.5 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none bg-white"
-                  />
-                </div>
-
-                <div className="col-span-1 md:col-span-4 grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div>
                     <label className="block text-xs font-semibold text-neutral-700 mb-1 flex justify-between">
                       <span>Primary Completion</span>
@@ -555,7 +516,7 @@ export default function App() {
                             <ArrowUpDown className="w-3 h-3" />
                           </div>
                         </th>
-                        <th className="p-4 font-semibold w-[250px] max-w-[250px]">Contacts</th>
+                        <th className="p-4 font-semibold min-w-[200px]">Contacts</th>
                         <th className="p-4 font-semibold text-right">Action</th>
                       </tr>
                     </thead>
@@ -598,7 +559,7 @@ export default function App() {
                                 </div>
                               )}
                             </td>
-                            <td className="p-4 align-top w-[250px] max-w-[250px]">
+                            <td className="p-4 align-top">
                               {renderContacts(trial)}
                             </td>
                             <td className="p-4 text-right align-top">
@@ -621,7 +582,7 @@ export default function App() {
             
             {!loading && results.length > 0 && displayResults.length === 0 && (
               <div className="text-center py-12 bg-white rounded-xl border border-neutral-200 text-neutral-500">
-                All results filtered out by minimum site count.
+                All results filtered out by minimum patient enrollment.
               </div>
             )}
           </div>
