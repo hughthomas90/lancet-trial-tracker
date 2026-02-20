@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Search, Plus, Trash2, FileText, AlertCircle, Loader2, RefreshCw, Settings, Bell, ArrowUpDown } from 'lucide-react';
+import { Search, Plus, Trash2, FileText, AlertCircle, Loader2, RefreshCw, Settings, Bell, ArrowUpDown, Star, BookOpen } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, updateDoc } from 'firebase/firestore';
@@ -43,6 +43,9 @@ export default function App() {
   const [results, setResults] = useState([]);
   
   const [watchlist, setWatchlist] = useState([]);
+  const [watchlistTopicId, setWatchlistTopicId] = useState('all');
+  const [watchlistFilter, setWatchlistFilter] = useState('');
+  const [watchlistSort, setWatchlistSort] = useState('date');
   const [updatesLoading, setUpdatesLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('search'); // search, watchlist, settings
 
@@ -103,6 +106,8 @@ export default function App() {
     // Dates
     const primaryCompletionDate = pSec?.statusModule?.primaryCompletionDateStruct?.date || 'Unknown';
     const studyCompletionDate = pSec?.statusModule?.completionDateStruct?.date || 'Unknown';
+    const firstSubmittedDate = pSec?.statusModule?.studyFirstSubmitDate || 'Unknown';
+    const lastUpdateDate = pSec?.statusModule?.lastUpdateSubmitDate || 'Unknown';
 
     // Outcomes & Locations
     const primaryOutcomes = pSec?.outcomesModule?.primaryOutcomes?.map(o => o.measure) || [];
@@ -123,6 +128,8 @@ export default function App() {
       enrollment,
       primaryCompletionDate,
       studyCompletionDate,
+      firstSubmittedDate,
+      lastUpdateDate,
       primaryOutcomes,
       countries,
       sitesCount,
@@ -203,7 +210,12 @@ export default function App() {
         const data = await response.json();
 
         if (data.studies && data.studies.length > 0) {
-          allParsedStudies = allParsedStudies.concat(data.studies.map(parseStudyData));
+          const newStudies = data.studies.map(s => {
+            const parsed = parseStudyData(s);
+            parsed.topicId = activeTopicId;
+            return parsed;
+          });
+          allParsedStudies = allParsedStudies.concat(newStudies);
         }
 
         nextPageToken = data.nextPageToken;
@@ -254,6 +266,50 @@ export default function App() {
       return 0;
     });
   }, [results, minSites, sortConfig]);
+
+  const processedWatchlist = useMemo(() => {
+    let filtered = watchlist;
+    
+    if (watchlistTopicId !== 'all') {
+      const topic = topics.find(t => t.id === watchlistTopicId);
+      filtered = filtered.filter(t => {
+        if (t.topicId) {
+          return t.topicId === watchlistTopicId;
+        }
+        // Legacy fallback for trials saved before topicId tagging
+        if (topic && topic.keywords.trim()) {
+          const keywords = topic.keywords.split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
+          const searchStr = `${t.title} ${t.sponsor} ${t.primaryOutcomes.join(' ')}`.toLowerCase();
+          return keywords.some(k => searchStr.includes(k));
+        }
+        return false;
+      });
+    }
+
+    if (watchlistFilter.trim()) {
+      const lowerFilter = watchlistFilter.toLowerCase();
+      filtered = filtered.filter(t => 
+        t.nctId.toLowerCase().includes(lowerFilter) ||
+        t.title.toLowerCase().includes(lowerFilter) ||
+        t.sponsor.toLowerCase().includes(lowerFilter) ||
+        (t.notes && t.notes.toLowerCase().includes(lowerFilter))
+      );
+    }
+
+    return filtered.sort((a, b) => {
+      if (watchlistSort === 'priority') {
+        if (a.isHighPriority !== b.isHighPriority) {
+          return a.isHighPriority ? -1 : 1;
+        }
+      } else if (watchlistSort === 'updates') {
+        if (a.hasUpdates !== b.hasUpdates) {
+          return a.hasUpdates ? -1 : 1;
+        }
+      }
+      // Fallback to date sorting
+      return new Date(b.savedAt) - new Date(a.savedAt);
+    });
+  }, [watchlist, watchlistFilter, watchlistTopicId, watchlistSort, topics]);
 
   const toggleSort = (key) => {
     setSortConfig(prev => ({
@@ -307,9 +363,14 @@ export default function App() {
     }
   };
 
-  const addToWatchlist = async (trial) => {
+  const addToWatchlist = async (trial, isHighPriority = false) => {
     if (!user || watchlist.find(t => t.nctId === trial.nctId)) return;
-    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'watchlist', trial.nctId), { ...trial, hasUpdates: false });
+    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'watchlist', trial.nctId), { 
+      ...trial, 
+      hasUpdates: false,
+      isHighPriority: isHighPriority,
+      notes: ''
+    });
   };
 
   const removeFromWatchlist = async (nctId) => {
@@ -324,6 +385,16 @@ export default function App() {
       previousStatus: null,
       previousDate: null
     });
+  };
+
+  const togglePriority = async (nctId, currentPriority) => {
+    if (!user) return;
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'watchlist', nctId), { isHighPriority: !currentPriority });
+  };
+
+  const saveNotes = async (nctId, notes) => {
+    if (!user) return;
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'watchlist', nctId), { notes });
   };
 
   const updateTopic = async (id, field, value) => {
@@ -356,6 +427,8 @@ export default function App() {
       content += `- **Enrollment:** ${t.enrollment} across ${t.sitesCount} sites\n`;
       content += `- **Countries:** ${t.countries.join(', ') || 'N/A'}\n`;
       content += `- **Sponsor:** ${t.sponsor}\n`;
+      if (t.isHighPriority) content += `- **Priority:** High\n`;
+      if (t.notes) content += `- **Notes:** ${t.notes}\n`;
       
       content += `- **Contacts:**\n`;
       let hasContact = false;
@@ -565,9 +638,14 @@ export default function App() {
                         return (
                           <tr key={trial.nctId} className="hover:bg-neutral-50">
                             <td className="p-4">
-                              <a href={`https://clinicaltrials.gov/study/${trial.nctId}`} target="_blank" rel="noreferrer" className="text-blue-600 font-mono text-xs mb-1 block hover:underline">
-                                {trial.nctId}
-                              </a>
+                              <div className="flex items-center gap-2 mb-1">
+                                <a href={`https://clinicaltrials.gov/study/${trial.nctId}`} target="_blank" rel="noreferrer" className="text-blue-600 font-mono text-xs hover:underline">
+                                  {trial.nctId}
+                                </a>
+                                <a href={`https://pubmed.ncbi.nlm.nih.gov/?term=${trial.nctId}`} target="_blank" rel="noreferrer" className="text-neutral-400 hover:text-blue-600 transition-colors" title="Search PubMed for publications">
+                                  <BookOpen className="w-3 h-3" />
+                                </a>
+                              </div>
                               <p className="font-medium text-neutral-900 mb-1">{trial.title}</p>
                               <div className="text-xs font-semibold text-neutral-700 mb-2">{trial.sponsor}</div>
                               <div className="flex gap-1 mb-3">
@@ -587,7 +665,9 @@ export default function App() {
                             <td className="p-4 align-top whitespace-nowrap">
                               <div className="font-medium text-neutral-900 mb-1">{trial.status.replace(/_/g, ' ')}</div>
                               <div className="text-xs text-neutral-600">Primary: {trial.primaryCompletionDate}</div>
-                              <div className="text-xs text-neutral-500">Study: {trial.studyCompletionDate}</div>
+                              <div className="text-xs text-neutral-500 mb-2">Study: {trial.studyCompletionDate}</div>
+                              <div className="text-[10px] text-neutral-400">Reg: {trial.firstSubmittedDate}</div>
+                              <div className="text-[10px] text-neutral-400">Upd: {trial.lastUpdateDate}</div>
                             </td>
                             <td className="p-4 align-top">
                               <div className="font-bold text-neutral-900 mb-1">n = {trial.enrollment}</div>
@@ -595,20 +675,36 @@ export default function App() {
                               {trial.countries.length > 0 && (
                                 <div className="text-xs text-neutral-500 max-w-[150px] truncate" title={trial.countries.join(', ')}>
                                   {trial.countries.join(', ')}
-                                </div>
+                                 </div>
                               )}
                             </td>
                             <td className="p-4 align-top w-[250px] max-w-[250px]">
                               {renderContacts(trial)}
                             </td>
                             <td className="p-4 text-right align-top">
-                              <button 
-                                onClick={() => addToWatchlist(trial)}
-                                disabled={inWatchlist}
-                                className={`inline-flex items-center space-x-1 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${inWatchlist ? 'bg-green-100 text-green-700' : 'bg-white border border-neutral-300 hover:bg-neutral-50'}`}
-                              >
-                                {inWatchlist ? <span>Tracking</span> : <><Plus className="w-4 h-4" /> <span>Track</span></>}
-                              </button>
+                              {inWatchlist ? (
+                                <button 
+                                  onClick={() => removeFromWatchlist(trial.nctId)}
+                                  className="inline-flex items-center space-x-1 px-3 py-1.5 rounded-md text-sm font-medium transition-colors min-w-[120px] justify-center bg-green-100 text-green-800 hover:bg-red-100 hover:text-red-700 border border-transparent"
+                                >
+                                  <Trash2 className="w-4 h-4" /> <span>Untrack</span>
+                                </button>
+                              ) : (
+                                <div className="flex flex-col items-end gap-2">
+                                  <button 
+                                    onClick={() => addToWatchlist(trial, false)}
+                                    className="inline-flex items-center space-x-1 px-3 py-1.5 rounded-md text-sm font-medium transition-colors min-w-[120px] justify-center bg-white border border-neutral-300 hover:bg-neutral-50"
+                                  >
+                                    <Plus className="w-4 h-4" /> <span>Track</span>
+                                  </button>
+                                  <button 
+                                    onClick={() => addToWatchlist(trial, true)}
+                                    className="inline-flex items-center space-x-1 px-3 py-1.5 rounded-md text-sm font-medium transition-colors min-w-[120px] justify-center bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
+                                  >
+                                    <Star className="w-4 h-4" fill="currentColor" /> <span>Priority</span>
+                                  </button>
+                                </div>
+                              )}
                             </td>
                           </tr>
                         )
@@ -630,63 +726,122 @@ export default function App() {
         {/* WATCHLIST TAB */}
         {activeTab === 'watchlist' && (
           <div className="space-y-6">
-            <div className="flex justify-between items-center bg-white p-6 rounded-xl shadow-sm border border-neutral-200">
+            <div className="flex flex-col md:flex-row justify-between items-start md:items-center bg-white p-6 rounded-xl shadow-sm border border-neutral-200 gap-4">
               <div>
                 <h2 className="text-xl font-bold text-neutral-900">Active Watchlist</h2>
                 <p className="text-sm text-neutral-500 mt-1">Trials are checked against CT.gov to spot status or date shifts.</p>
               </div>
-              <div className="flex space-x-3">
-                <button onClick={checkWatchlistUpdates} disabled={updatesLoading} className="px-4 py-2 border border-neutral-300 text-neutral-700 rounded-lg font-medium hover:bg-neutral-50 flex items-center space-x-2">
+              <div className="flex flex-col sm:flex-row space-y-3 sm:space-y-0 sm:space-x-3 w-full md:w-auto">
+                <select 
+                  value={watchlistTopicId} 
+                  onChange={(e) => setWatchlistTopicId(e.target.value)}
+                  className="px-3 py-2 border border-neutral-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white text-neutral-700 w-full sm:w-auto"
+                >
+                  <option value="all">All Topics</option>
+                  {topics.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+                <div className="relative w-full sm:w-64">
+                  <Search className="w-4 h-4 absolute left-3 top-1/2 transform -translate-y-1/2 text-neutral-400" />
+                  <input
+                    type="text"
+                    placeholder="Filter keywords/ID..."
+                    value={watchlistFilter}
+                    onChange={(e) => setWatchlistFilter(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2 border border-neutral-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <select 
+                  value={watchlistSort} 
+                  onChange={(e) => setWatchlistSort(e.target.value)}
+                  className="px-3 py-2 border border-neutral-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white text-neutral-700 w-full sm:w-auto"
+                >
+                  <option value="date">Sort: Newest</option>
+                  <option value="priority">Sort: Priority</option>
+                  <option value="updates">Sort: Updates</option>
+                </select>
+                <button onClick={checkWatchlistUpdates} disabled={updatesLoading} className="px-4 py-2 border border-neutral-300 text-neutral-700 rounded-lg font-medium hover:bg-neutral-50 flex items-center justify-center space-x-2 w-full sm:w-auto">
                   <RefreshCw className={`w-4 h-4 ${updatesLoading ? 'animate-spin' : ''}`} />
-                  <span>{updatesLoading ? 'Checking...' : 'Refresh Data'}</span>
+                  <span>{updatesLoading ? 'Checking...' : 'Refresh'}</span>
                 </button>
-                <button onClick={generateReport} disabled={watchlist.length === 0} className="px-4 py-2 bg-slate-900 text-white rounded-lg font-medium hover:bg-slate-800 flex items-center space-x-2">
+                <button onClick={generateReport} disabled={watchlist.length === 0} className="px-4 py-2 bg-slate-900 text-white rounded-lg font-medium hover:bg-slate-800 flex items-center justify-center space-x-2 w-full sm:w-auto">
                   <FileText className="w-4 h-4" />
-                  <span>Export Report</span>
+                  <span>Export</span>
                 </button>
               </div>
             </div>
 
             {watchlist.length === 0 ? (
               <div className="text-center py-12 text-neutral-500 bg-white border border-neutral-200 rounded-xl">Watchlist is empty.</div>
+            ) : processedWatchlist.length === 0 ? (
+              <div className="text-center py-12 text-neutral-500 bg-white border border-neutral-200 rounded-xl">No trials match your filter.</div>
             ) : (
               <div className="grid gap-4">
-                {watchlist.map((trial) => (
-                  <div key={trial.nctId} className={`p-5 rounded-xl border ${trial.hasUpdates ? 'bg-red-50 border-red-200' : 'bg-white border-neutral-200'} flex flex-col md:flex-row gap-4 justify-between items-start transition-colors`}>
-                    <div className="flex-grow">
-                      <div className="flex items-center space-x-3 mb-2">
-                        <span className="text-xs font-mono bg-neutral-100 text-neutral-600 px-2 py-1 rounded">{trial.nctId}</span>
-                        {trial.hasUpdates && <span className="bg-red-500 text-white text-[10px] uppercase font-bold px-2 py-1 rounded-full flex items-center gap-1"><Bell className="w-3 h-3"/> Update Detected</span>}
-                      </div>
-                      <h3 className="font-semibold text-neutral-900 leading-snug">{trial.title}</h3>
-                      
-                      {trial.hasUpdates && (
-                        <div className="mt-3 p-3 bg-white rounded border border-red-100 text-sm">
-                          {trial.previousStatus && trial.previousStatus !== trial.status && (
-                            <div className="text-red-700"><strong>Status changed:</strong> <span className="line-through opacity-60">{trial.previousStatus.replace(/_/g, ' ')}</span> &rarr; {trial.status.replace(/_/g, ' ')}</div>
+                {processedWatchlist.map((trial) => (
+                  <div key={trial.nctId} className={`p-5 rounded-xl border ${trial.hasUpdates ? 'bg-red-50 border-red-200' : trial.isHighPriority ? 'bg-amber-50/30 border-amber-200' : 'bg-white border-neutral-200'} flex flex-col gap-4 transition-colors`}>
+                    <div className="flex flex-col md:flex-row justify-between items-start gap-4">
+                      <div className="flex-grow">
+                        <div className="flex items-center space-x-3 mb-2">
+                          <button onClick={() => togglePriority(trial.nctId, trial.isHighPriority)} className="focus:outline-none group" title="Toggle High Priority">
+                            <Star 
+                              fill={trial.isHighPriority ? "currentColor" : "none"} 
+                              className={`w-5 h-5 transition-colors ${trial.isHighPriority ? 'text-amber-500' : 'text-neutral-300 group-hover:text-amber-500'}`} 
+                            />
+                          </button>
+                          <span className="text-xs font-mono bg-neutral-100 text-neutral-600 px-2 py-1 rounded">{trial.nctId}</span>
+                          <a href={`https://pubmed.ncbi.nlm.nih.gov/?term=${trial.nctId}`} target="_blank" rel="noreferrer" className="p-1 text-neutral-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors" title="Search PubMed for publications">
+                            <BookOpen className="w-4 h-4" />
+                          </a>
+                          {trial.topicId && topics.find(t => t.id === trial.topicId) && (
+                            <span className="text-[10px] uppercase font-bold tracking-wider text-blue-700 bg-blue-100 px-2 py-1 rounded">
+                              {topics.find(t => t.id === trial.topicId)?.name}
+                            </span>
                           )}
-                          {trial.previousDate && trial.previousDate !== trial.primaryCompletionDate && (
-                            <div className="text-red-700"><strong>Completion Date changed:</strong> <span className="line-through opacity-60">{trial.previousDate}</span> &rarr; {trial.primaryCompletionDate}</div>
-                          )}
+                          {trial.hasUpdates && <span className="bg-red-500 text-white text-[10px] uppercase font-bold px-2 py-1 rounded-full flex items-center gap-1"><Bell className="w-3 h-3"/> Update Detected</span>}
                         </div>
-                      )}
+                        <h3 className="font-semibold text-neutral-900 leading-snug">{trial.title}</h3>
+                        
+                        {trial.hasUpdates && (
+                          <div className="mt-3 p-3 bg-white rounded border border-red-100 text-sm">
+                            {trial.previousStatus && trial.previousStatus !== trial.status && (
+                              <div className="text-red-700"><strong>Status changed:</strong> <span className="line-through opacity-60">{trial.previousStatus.replace(/_/g, ' ')}</span> &rarr; {trial.status.replace(/_/g, ' ')}</div>
+                            )}
+                            {trial.previousDate && trial.previousDate !== trial.primaryCompletionDate && (
+                              <div className="text-red-700"><strong>Completion Date changed:</strong> <span className="line-through opacity-60">{trial.previousDate}</span> &rarr; {trial.primaryCompletionDate}</div>
+                            )}
+                          </div>
+                        )}
 
-                      <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm text-neutral-600">
-                        <div><strong className="text-neutral-800 block">Sponsor & Contacts</strong>{trial.sponsor}<div className="mt-1">{renderContacts(trial)}</div></div>
-                        <div><strong className="text-neutral-800 block">Current Status</strong>{trial.status.replace(/_/g, ' ')}</div>
-                        <div><strong className="text-neutral-800 block">Primary Completion</strong>{trial.primaryCompletionDate}</div>
+                        <div className="mt-4 grid grid-cols-1 sm:grid-cols-4 gap-4 text-sm text-neutral-600">
+                          <div><strong className="text-neutral-800 block">Sponsor & Contacts</strong>{trial.sponsor}<div className="mt-1">{renderContacts(trial)}</div></div>
+                          <div><strong className="text-neutral-800 block">Current Status</strong>{trial.status.replace(/_/g, ' ')}</div>
+                          <div><strong className="text-neutral-800 block">Primary Completion</strong>{trial.primaryCompletionDate}</div>
+                          <div className="text-xs text-neutral-400 space-y-1 mt-1 sm:mt-0">
+                            <div><strong className="text-neutral-500">Registered:</strong><br/>{trial.firstSubmittedDate}</div>
+                            <div><strong className="text-neutral-500">Updated:</strong><br/>{trial.lastUpdateDate}</div>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <div className="flex flex-row md:flex-col gap-2 flex-shrink-0">
+                        {trial.hasUpdates && (
+                           <button onClick={() => acknowledgeUpdates(trial.nctId)} className="px-3 py-1.5 text-xs font-medium bg-red-100 text-red-700 hover:bg-red-200 rounded transition-colors">
+                             Acknowledge
+                           </button>
+                        )}
+                        <button onClick={() => removeFromWatchlist(trial.nctId)} className="p-2 text-red-400 hover:bg-red-50 hover:text-red-600 rounded transition-colors" title="Remove">
+                          <Trash2 className="w-5 h-5 md:mx-auto" />
+                        </button>
                       </div>
                     </div>
                     
-                    <div className="flex flex-col gap-2 flex-shrink-0">
-                      {trial.hasUpdates && (
-                         <button onClick={() => acknowledgeUpdates(trial.nctId)} className="px-3 py-1.5 text-xs font-medium bg-red-100 text-red-700 hover:bg-red-200 rounded transition-colors">
-                           Acknowledge
-                         </button>
-                      )}
-                      <button onClick={() => removeFromWatchlist(trial.nctId)} className="p-2 text-red-400 hover:bg-red-50 hover:text-red-600 rounded transition-colors" title="Remove">
-                        <Trash2 className="w-5 h-5 mx-auto" />
-                      </button>
+                    <div className="mt-2 pt-4 border-t border-neutral-100">
+                      <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-2">Editor Notes</label>
+                      <textarea 
+                        defaultValue={trial.notes || ''} 
+                        onBlur={(e) => saveNotes(trial.nctId, e.target.value)}
+                        placeholder="Add internal notes regarding trial status, PI outreach, etc..."
+                        className="w-full p-2.5 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none resize-y min-h-[80px]" 
+                      />
                     </div>
                   </div>
                 ))}
