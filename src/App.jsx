@@ -470,7 +470,7 @@ export default function App() {
       <nav className="bg-slate-900 text-white p-4 shadow-md flex justify-between items-center">
         <div className="flex items-center space-x-2">
           <AlertCircle className="w-6 h-6 text-red-500" />
-          <h1 className="text-xl font-bold tracking-tight">Commissioning Radar</h1>
+          <h1 className="text-xl font-bold tracking-tight">Lancet Trial Tracker</h1>
         </div>
         <div className="flex space-x-1 border border-slate-700 rounded-md p-1 bg-slate-800">
           <button onClick={() => setActiveTab('search')} className={`px-4 py-2 text-sm font-medium rounded-sm transition-colors ${activeTab === 'search' ? 'bg-slate-600 text-white' : 'text-slate-300 hover:text-white hover:bg-slate-700'}`}>
