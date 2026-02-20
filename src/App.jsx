@@ -153,8 +153,11 @@ export default function App() {
 
     try {
       // 1. Build Keyword Query
+      // CHANGE: Removed quotes ("") around keywords to allow API synonym expansion
       const topicKeywordArray = activeTopic.keywords.split(',').map(k => k.trim()).filter(Boolean);
-      let termQuery = topicKeywordArray.map(k => `"${k}"`).join(' OR ');
+      
+      // Wrap each keyword in parentheses to group multi-word terms safely without forcing exact phrase match
+      let termQuery = topicKeywordArray.map(k => `(${k})`).join(' OR ');
       
       if (topicKeywordArray.length > 1) {
         termQuery = `(${termQuery})`;
@@ -163,7 +166,8 @@ export default function App() {
       // Add additional keywords as an AND condition
       if (additionalKeywords.trim()) {
         const addKeywordArray = additionalKeywords.split(',').map(k => k.trim()).filter(Boolean);
-        const addTermQuery = addKeywordArray.map(k => `"${k}"`).join(' OR ');
+        // CHANGE: Removed quotes here as well
+        const addTermQuery = addKeywordArray.map(k => `(${k})`).join(' OR ');
         termQuery = `${termQuery} AND (${addTermQuery})`;
       }
 
@@ -183,7 +187,6 @@ export default function App() {
         advancedFilters.push(`AREA[PrimaryCompletionDate]RANGE[${getTodayDate()},${getFutureDate(timeframeMonths)}]`);
       }
 
-      // Moved minEnrollment filtering to API
       if (minEnrollment > 0) {
         advancedFilters.push(`AREA[EnrollmentCount]RANGE[${minEnrollment},MAX]`);
       }
@@ -199,9 +202,10 @@ export default function App() {
       let allParsedStudies = [];
       let nextPageToken = null;
       let pageCount = 0;
-      const MAX_PAGES = 10; // Hard cap at 1000 trials to prevent client crashes
+      const MAX_PAGES = 10; 
 
       do {
+        // Construct final URL
         let url = `${CTG_API_BASE}?query.term=${encodeURIComponent(termQuery)}${advancedQueryString}${statusFilter}&pageSize=100`;
         if (nextPageToken) url += `&pageToken=${nextPageToken}`;
 
@@ -228,7 +232,7 @@ export default function App() {
         return;
       }
 
-      // Phase 1 high-impact proxy filter (Client-side logic required here)
+      // Phase 1 high-impact proxy filter
       if (phases.phase1Impact) {
         allParsedStudies = allParsedStudies.filter(study => {
           if (study.phases.includes('PHASE1') && !study.phases.includes('PHASE2')) return study.enrollment > 40;
@@ -776,75 +780,130 @@ export default function App() {
               <div className="text-center py-12 text-neutral-500 bg-white border border-neutral-200 rounded-xl">No trials match your filter.</div>
             ) : (
               <div className="grid gap-4">
-                {processedWatchlist.map((trial) => (
-                  <div key={trial.nctId} className={`p-5 rounded-xl border ${trial.hasUpdates ? 'bg-red-50 border-red-200' : trial.isHighPriority ? 'bg-amber-50/30 border-amber-200' : 'bg-white border-neutral-200'} flex flex-col gap-4 transition-colors`}>
-                    <div className="flex flex-col md:flex-row justify-between items-start gap-4">
-                      <div className="flex-grow">
-                        <div className="flex items-center space-x-3 mb-2">
-                          <button onClick={() => togglePriority(trial.nctId, trial.isHighPriority)} className="focus:outline-none group" title="Toggle High Priority">
-                            <Star 
-                              fill={trial.isHighPriority ? "currentColor" : "none"} 
-                              className={`w-5 h-5 transition-colors ${trial.isHighPriority ? 'text-amber-500' : 'text-neutral-300 group-hover:text-amber-500'}`} 
-                            />
-                          </button>
-                          <span className="text-xs font-mono bg-neutral-100 text-neutral-600 px-2 py-1 rounded">{trial.nctId}</span>
-                          <a href={`https://pubmed.ncbi.nlm.nih.gov/?term=${trial.nctId}`} target="_blank" rel="noreferrer" className="p-1 text-neutral-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors" title="Search PubMed for publications">
-                            <BookOpen className="w-4 h-4" />
-                          </a>
-                          {trial.topicId && topics.find(t => t.id === trial.topicId) && (
-                            <span className="text-[10px] uppercase font-bold tracking-wider text-blue-700 bg-blue-100 px-2 py-1 rounded">
-                              {topics.find(t => t.id === trial.topicId)?.name}
-                            </span>
-                          )}
-                          {trial.hasUpdates && <span className="bg-red-500 text-white text-[10px] uppercase font-bold px-2 py-1 rounded-full flex items-center gap-1"><Bell className="w-3 h-3"/> Update Detected</span>}
-                        </div>
-                        <h3 className="font-semibold text-neutral-900 leading-snug">{trial.title}</h3>
-                        
-                        {trial.hasUpdates && (
-                          <div className="mt-3 p-3 bg-white rounded border border-red-100 text-sm">
-                            {trial.previousStatus && trial.previousStatus !== trial.status && (
-                              <div className="text-red-700"><strong>Status changed:</strong> <span className="line-through opacity-60">{trial.previousStatus.replace(/_/g, ' ')}</span> &rarr; {trial.status.replace(/_/g, ' ')}</div>
-                            )}
-                            {trial.previousDate && trial.previousDate !== trial.primaryCompletionDate && (
-                              <div className="text-red-700"><strong>Completion Date changed:</strong> <span className="line-through opacity-60">{trial.previousDate}</span> &rarr; {trial.primaryCompletionDate}</div>
-                            )}
-                          </div>
-                        )}
+                {processedWatchlist.length === 0 ? (
+              <div className="text-center py-12 text-neutral-500 bg-white border border-neutral-200 rounded-xl">No trials match your filter.</div>
+            ) : (
+              <div className="bg-white rounded-xl shadow-sm border border-neutral-200 overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-neutral-50 text-xs uppercase tracking-wider text-neutral-500 border-b border-neutral-200">
+                        <th className="p-4 font-semibold min-w-[400px]">Study, Sponsor & Endpoints</th>
+                        <th className="p-4 font-semibold">Timeline</th>
+                        <th className="p-4 font-semibold">Size & Locations</th>
+                        <th className="p-4 font-semibold w-[250px] max-w-[250px]">Contacts</th>
+                        <th className="p-4 font-semibold text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-neutral-200 text-sm">
+                      {processedWatchlist.map((trial) => {
+                        const rowClass = trial.hasUpdates ? 'bg-red-50' : trial.isHighPriority ? 'bg-amber-50/30' : 'bg-white hover:bg-neutral-50';
+                        return (
+                          <React.Fragment key={trial.nctId}>
+                            <tr className={`${rowClass} transition-colors border-b-0`}>
+                              <td className="p-4 align-top">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <button onClick={() => togglePriority(trial.nctId, trial.isHighPriority)} className="focus:outline-none group mt-0.5" title="Toggle High Priority">
+                                    <Star fill={trial.isHighPriority ? "currentColor" : "none"} className={`w-4 h-4 transition-colors ${trial.isHighPriority ? 'text-amber-500' : 'text-neutral-300 group-hover:text-amber-500'}`} />
+                                  </button>
+                                  <a href={`https://clinicaltrials.gov/study/${trial.nctId}`} target="_blank" rel="noreferrer" className="text-blue-600 font-mono text-xs hover:underline">
+                                    {trial.nctId}
+                                  </a>
+                                  <a href={`https://pubmed.ncbi.nlm.nih.gov/?term=${trial.nctId}`} target="_blank" rel="noreferrer" className="text-neutral-400 hover:text-blue-600 transition-colors" title="Search PubMed for publications">
+                                    <BookOpen className="w-3 h-3" />
+                                  </a>
+                                  {trial.topicId && topics.find(t => t.id === trial.topicId) && (
+                                    <span className="text-[10px] uppercase font-bold tracking-wider text-blue-700 bg-blue-100 px-1.5 py-0.5 rounded">
+                                      {topics.find(t => t.id === trial.topicId)?.name}
+                                    </span>
+                                  )}
+                                  {trial.hasUpdates && <span className="bg-red-500 text-white text-[10px] uppercase font-bold px-1.5 py-0.5 rounded-full flex items-center gap-1"><Bell className="w-3 h-3"/> Update</span>}
+                                </div>
+                                <p className="font-medium text-neutral-900 mb-1 leading-snug">{trial.title}</p>
+                                <div className="text-xs font-semibold text-neutral-700 mb-2">{trial.sponsor}</div>
+                                <div className="flex gap-1 mb-3">
+                                  {trial.phases.map(p => <span key={p} className="bg-slate-200 text-slate-800 text-[10px] px-1.5 py-0.5 rounded font-bold">{p}</span>)}
+                                </div>
+                                
+                                {trial.hasUpdates && (
+                                  <div className="mb-3 p-2 bg-white rounded border border-red-200 text-xs shadow-sm">
+                                    {trial.previousStatus && trial.previousStatus !== trial.status && (
+                                      <div className="text-red-700"><strong>Status changed:</strong> <span className="line-through opacity-60">{trial.previousStatus.replace(/_/g, ' ')}</span> &rarr; {trial.status.replace(/_/g, ' ')}</div>
+                                    )}
+                                    {trial.previousDate && trial.previousDate !== trial.primaryCompletionDate && (
+                                      <div className="text-red-700"><strong>Completion changed:</strong> <span className="line-through opacity-60">{trial.previousDate}</span> &rarr; {trial.primaryCompletionDate}</div>
+                                    )}
+                                  </div>
+                                )}
 
-                        <div className="mt-4 grid grid-cols-1 sm:grid-cols-4 gap-4 text-sm text-neutral-600">
-                          <div><strong className="text-neutral-800 block">Sponsor & Contacts</strong>{trial.sponsor}<div className="mt-1">{renderContacts(trial)}</div></div>
-                          <div><strong className="text-neutral-800 block">Current Status</strong>{trial.status.replace(/_/g, ' ')}</div>
-                          <div><strong className="text-neutral-800 block">Primary Completion</strong>{trial.primaryCompletionDate}</div>
-                          <div className="text-xs text-neutral-400 space-y-1 mt-1 sm:mt-0">
-                            <div><strong className="text-neutral-500">Registered:</strong><br/>{trial.firstSubmittedDate}</div>
-                            <div><strong className="text-neutral-500">Updated:</strong><br/>{trial.lastUpdateDate}</div>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      <div className="flex flex-row md:flex-col gap-2 flex-shrink-0">
-                        {trial.hasUpdates && (
-                           <button onClick={() => acknowledgeUpdates(trial.nctId)} className="px-3 py-1.5 text-xs font-medium bg-red-100 text-red-700 hover:bg-red-200 rounded transition-colors">
-                             Acknowledge
-                           </button>
-                        )}
-                        <button onClick={() => removeFromWatchlist(trial.nctId)} className="p-2 text-red-400 hover:bg-red-50 hover:text-red-600 rounded transition-colors" title="Remove">
-                          <Trash2 className="w-5 h-5 md:mx-auto" />
-                        </button>
-                      </div>
-                    </div>
-                    
-                    <div className="mt-2 pt-4 border-t border-neutral-100">
-                      <label className="block text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-2">Editor Notes</label>
-                      <textarea 
-                        defaultValue={trial.notes || ''} 
-                        onBlur={(e) => saveNotes(trial.nctId, e.target.value)}
-                        placeholder="Add internal notes regarding trial status, PI outreach, etc..."
-                        className="w-full p-2.5 bg-neutral-50 border border-neutral-200 rounded-lg text-sm focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none resize-y min-h-[80px]" 
-                      />
-                    </div>
-                  </div>
-                ))}
+                                {trial.primaryOutcomes?.length > 0 && (
+                                  <div className="mt-2 text-xs text-neutral-600 bg-white/50 p-2 rounded border border-neutral-100 max-h-24 overflow-y-auto">
+                                    <strong className="text-neutral-800 block mb-1">Primary Endpoints:</strong>
+                                    <ul className="list-disc pl-4 space-y-1">
+                                      {trial.primaryOutcomes.map((outcome, idx) => (
+                                        <li key={idx} className="line-clamp-2" title={outcome}>{outcome}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                              </td>
+                              <td className="p-4 align-top whitespace-nowrap">
+                                <div className="font-medium text-neutral-900 mb-1">{trial.status.replace(/_/g, ' ')}</div>
+                                <div className="text-xs text-neutral-600">Primary: {trial.primaryCompletionDate}</div>
+                                <div className="text-xs text-neutral-500 mb-2">Study: {trial.studyCompletionDate}</div>
+                                <div className="text-[10px] text-neutral-400">Reg: {trial.firstSubmittedDate}</div>
+                                <div className="text-[10px] text-neutral-400">Upd: {trial.lastUpdateDate}</div>
+                              </td>
+                              <td className="p-4 align-top">
+                                <div className="font-bold text-neutral-900 mb-1">n = {trial.enrollment}</div>
+                                <div className="text-xs text-neutral-600 mb-1">{trial.sitesCount} Sites</div>
+                                {trial.countries?.length > 0 && (
+                                  <div className="text-xs text-neutral-500 max-w-[150px] truncate" title={trial.countries.join(', ')}>
+                                    {trial.countries.join(', ')}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="p-4 align-top w-[250px] max-w-[250px]">
+                                {renderContacts(trial)}
+                              </td>
+                              <td className="p-4 text-right align-top">
+                                <div className="flex flex-col items-end gap-2">
+                                  {trial.hasUpdates && (
+                                     <button onClick={() => acknowledgeUpdates(trial.nctId)} className="inline-flex items-center space-x-1 px-3 py-1.5 rounded-md text-xs font-medium bg-red-100 text-red-700 hover:bg-red-200 transition-colors min-w-[100px] justify-center">
+                                       <span>Ack</span>
+                                     </button>
+                                  )}
+                                  <button 
+                                    onClick={() => removeFromWatchlist(trial.nctId)}
+                                    className="inline-flex items-center space-x-1 px-3 py-1.5 rounded-md text-xs font-medium transition-colors min-w-[100px] justify-center bg-white border border-neutral-300 text-red-600 hover:bg-red-50 hover:border-red-200"
+                                  >
+                                    <Trash2 className="w-3 h-3" /> <span>Remove</span>
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                            <tr className={`${rowClass} transition-colors`}>
+                              <td colSpan="5" className="px-4 pb-4 pt-0 border-t-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider">Notes</span>
+                                  <input 
+                                    type="text" 
+                                    defaultValue={trial.notes || ''} 
+                                    onBlur={(e) => saveNotes(trial.nctId, e.target.value)}
+                                    placeholder="Add internal notes regarding trial status, PI outreach, etc..."
+                                    className="w-full p-2 bg-white/60 border border-neutral-200 rounded text-xs focus:bg-white focus:ring-1 focus:ring-blue-500 outline-none transition-colors" 
+                                  />
+                                </div>
+                              </td>
+                            </tr>
+                          </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
               </div>
             )}
           </div>
